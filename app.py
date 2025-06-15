@@ -3,16 +3,29 @@ import pandas as pd
 import geopandas as gpd
 import plotly.express as px
 import numpy as np
+from pathlib import Path
 from fetch_and_prepare import (
     get_taxon_key,
     fetch_occurrences_for_taxon,
     assign_to_counties
 )
 
-st.set_page_config(page_title="🐀🦟 Maryland Vector Hotspot Explorer", layout="wide")
+# Point to your crown logo
+logo_path = Path(__file__).parent / "logo.png"
+
+# Use the crown image as the page icon
+st.set_page_config(
+    page_title="🐀🦟 Maryland Vector Hotspot Explorer",
+    page_icon=str(logo_path),
+    layout="wide"
+)
+
 st.title("🐀🦟 Maryland Vector Hotspot Explorer")
 
-st.markdown("This app fetches real-time GBIF data and visualizes spatial and temporal hotspots for disease-related vectors in Maryland.")
+st.markdown(
+    "This app fetches real-time GBIF data and visualizes spatial and temporal hotspots "
+    "for disease-related vectors in Maryland."
+)
 
 # ---------------------- Sidebar ------------------------
 species_list = [
@@ -33,10 +46,10 @@ if "county_selection" not in st.session_state:
     st.session_state.county_selection = []
 
 # Build county selector conditionally after data loads
+county_selection = []
 if compare_counties:
     if st.session_state.gdf_joined is None:
         st.sidebar.info("Run analysis first to load counties for comparison.")
-        county_selection = []
     else:
         county_options = sorted(st.session_state.gdf_joined["NAME_2"].dropna().unique())
         county_selection = st.sidebar.multiselect(
@@ -46,12 +59,10 @@ if compare_counties:
             default=st.session_state.county_selection
         )
         st.session_state.county_selection = county_selection
-else:
-    county_selection = []
 
 # -------------------- Main Execution -------------------
 if st.sidebar.button("Run Analysis"):
-    st.info("Fetching live GBIF data...")
+    st.info("Fetching live GBIF data…")
     try:
         key = get_taxon_key(selected_species)
         df_occ = fetch_occurrences_for_taxon(
@@ -70,7 +81,7 @@ if st.sidebar.button("Run Analysis"):
         st.warning("No records retrieved. Try adjusting filters.")
         st.stop()
 
-    # Use GBIF's year/month directly, drop rows missing either
+    # Clean and prepare date fields
     df_occ = df_occ.dropna(subset=["year", "month"])
     df_occ["year"] = df_occ["year"].astype(int)
     df_occ["month"] = df_occ["month"].astype(int)
@@ -79,11 +90,11 @@ if st.sidebar.button("Run Analysis"):
         errors="coerce"
     )
 
-    # Assign to counties and store in session
+    # Spatial join to counties
     gdf_joined = assign_to_counties(df_occ)
     st.session_state.gdf_joined = gdf_joined
 
-    # Compute per-county occurrence count for Risk Score
+    # Compute per-county counts & normalize to a 0–1 Risk Score
     county_counts = (
         gdf_joined
         .groupby(["NAME_2", "queried_scientificName"])
@@ -94,13 +105,12 @@ if st.sidebar.button("Run Analysis"):
     county_counts["Risk Score"] /= county_counts["Risk Score"].max()
     county_counts["Risk Score"] = county_counts["Risk Score"].round(2)
 
-    # Display risk scores for two counties before monthly chart
+    # If comparing two counties, show their scores up front
     if compare_counties and len(county_selection) == 2:
-        sel = county_selection
-        risk_dict = county_counts.set_index("NAME_2")["Risk Score"].to_dict()
+        scores = county_counts.set_index("NAME_2")["Risk Score"].to_dict()
         st.markdown(
-            f"**{sel[0]} Risk Score:** {risk_dict.get(sel[0], 0):.2f}  &nbsp;&nbsp; "
-            f"**{sel[1]} Risk Score:** {risk_dict.get(sel[1], 0):.2f}"
+            f"**{county_selection[0]} Risk Score:** {scores.get(county_selection[0], 0):.2f}  &nbsp;&nbsp; "
+            f"**{county_selection[1]} Risk Score:** {scores.get(county_selection[1], 0):.2f}"
         )
 
     st.success(f"Fetched {len(df_occ)} occurrence records.")
@@ -110,8 +120,7 @@ if st.sidebar.button("Run Analysis"):
     county_geo = gpd.read_file("md_counties.geojson")
     merged = county_geo.merge(
         county_counts,
-        left_on="NAME_2",
-        right_on="NAME_2",
+        on="NAME_2",
         how="left"
     ).fillna({"Risk Score": 0, "occurrence_count": 0})
 
@@ -134,16 +143,13 @@ if st.sidebar.button("Run Analysis"):
     # -------------------- Monthly Chart --------------------
     if show_monthly:
         st.subheader("Monthly Presence Over Time")
-
         if compare_counties and len(county_selection) == 2:
-            sel = county_selection
             monthly_counts = (
-                gdf_joined[gdf_joined["NAME_2"].isin(sel)]
+                gdf_joined[gdf_joined["NAME_2"].isin(county_selection)]
                 .groupby(["year_month", "queried_scientificName", "NAME_2"])
                 .size()
                 .reset_index(name="count")
             )
-
             fig_month = px.line(
                 monthly_counts,
                 x="year_month",
@@ -153,10 +159,6 @@ if st.sidebar.button("Run Analysis"):
                 title="Monthly Occurrence Comparison by County",
                 labels={"count": "Occurrences", "year_month": "Date"}
             )
-            fig_month.update_layout(legend_title_text=None)
-            fig_month.update_xaxes(type="date")
-            st.plotly_chart(fig_month, use_container_width=True)
-
         else:
             monthly_counts = (
                 df_occ
@@ -164,7 +166,6 @@ if st.sidebar.button("Run Analysis"):
                 .size()
                 .reset_index(name="count")
             )
-
             fig_month = px.line(
                 monthly_counts,
                 x="year_month",
@@ -173,21 +174,18 @@ if st.sidebar.button("Run Analysis"):
                 title="Monthly Occurrence Counts",
                 labels={"count": "Occurrences", "year_month": "Date"}
             )
-            fig_month.update_xaxes(type="date")
-            st.plotly_chart(fig_month, use_container_width=True)
+        fig_month.update_xaxes(type="date")
+        st.plotly_chart(fig_month, use_container_width=True)
 
     # -------------------- Annual Chart --------------------
     st.subheader("Annual Presence Summary")
-
     if compare_counties and len(county_selection) == 2:
-        sel = county_selection
         annual_counts = (
-            gdf_joined[gdf_joined["NAME_2"].isin(sel)]
+            gdf_joined[gdf_joined["NAME_2"].isin(county_selection)]
             .groupby(["year", "NAME_2"])
             .size()
             .reset_index(name="count")
         )
-
         fig_annual = px.line(
             annual_counts,
             x="year",
@@ -198,9 +196,6 @@ if st.sidebar.button("Run Analysis"):
             title="Annual Occurrence Comparison by County",
             labels={"count": "Occurrences", "year": "Year"}
         )
-        fig_annual.update_layout(legend_title_text=None)
-        st.plotly_chart(fig_annual, use_container_width=True)
-
     else:
         annual_counts = (
             df_occ
@@ -208,7 +203,6 @@ if st.sidebar.button("Run Analysis"):
             .size()
             .reset_index(name="count")
         )
-
         fig_annual = px.bar(
             annual_counts,
             x="year",
@@ -218,4 +212,4 @@ if st.sidebar.button("Run Analysis"):
             title="Annual Occurrence Counts by Species",
             labels={"count": "Occurrences", "year": "Year"}
         )
-        st.plotly_chart(fig_annual, use_container_width=True)
+    st.plotly_chart(fig_annual, use_container_width=True)
